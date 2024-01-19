@@ -1,0 +1,169 @@
+---
+title: "US WPN Stores"
+output: html_notebook
+---
+
+Data Source: https://www.google.com/maps/d/viewer?mid=1mPM4WTHfcH3eJL2Ulbua_BX2br4&hl=en_US&ll=-3.81666561775622e-14%2C0&z=1
+Official Store Finder (manual): https://locator.wizards.com/
+Analysis Objectives:
+- Examine the density of WPN stores across the US, especially in cities of interest (Houston, Austin, Boston, LA, San Diego, Pitsburg, etc.)
+- Find cities with high WPN density
+- Perhaps overlay with average apartment cost data to analyze low-cost areas with high WPN density 
+- Overlay with other map data (political leanings, walkability, weather, biostats jobs?)
+- Overlay with google trends data? Either searches directly associated with WPN stores (ie. 'magic the gathering', 'commander', 'draft') or search terms that are more broad / associated with other interests ('racquetball', 'world of warcraft', 'hiking', 'anime')
+- Overall objective would be to explore the associates between relevant location factors (housing, cost of living, culture) and density of WPN stores. Are there more WPN stores around areas that you would be interested in living in? Can the density of WPN stores help you find potential new cities to look for jobs? 
+- Is there any way to evaluate WPN quality? Add in google reviews, traffic at that store.
+
+```{r}
+# Required Packages
+library(dplyr)
+library(sf)
+library(leaflet) # for interactive map plots
+library(xml2)
+library(ggplot2)
+library(rnaturalearth) # to get map boundaries 
+library(geosphere) # to calc distances? 
+library(tidygeocoder) # to geocode
+library(tidycensus)
+```
+
+```{r}
+# Data location
+data_path <- "/Users/brian/Library/CloudStorage/GoogleDrive-bheckler24@gmail.com/My Drive/myLearning/R_WPN_store_maps/data/"
+kml_file <- "WPN_Store_Locator.kml"
+data_path <- paste0(data_path, kml_file)
+
+# Walkability
+gbd_table <- paste0(data_path, "WalkabilityIndex/Natl_WI.gdb/a00000009.gdbtable")
+```
+
+```{r}
+# Import WPN Data
+kml_layers <- st_layers(data_path)
+
+# Walkability data
+walk <- st_read(gbd_table)
+
+us_layers <- kml_layers$name[5:8]
+# US data of WPN stores
+dat_us_1 <- st_read(data_path, layer = us_layers[1])
+dat_us_2 <- st_read(data_path, layer = us_layers[2])
+dat_us_3 <- st_read(data_path, layer = us_layers[3])
+dat_us_4 <- st_read(data_path, layer = us_layers[4])
+
+
+dat <- rbind(dat_us_1, dat_us_2, dat_us_3, dat_us_4)
+# Reproject data to WGS84
+
+# Get world boundaries data
+world_boundaries <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Filter the world boundaries for the United States
+us_boundaries <- world_boundaries[world_boundaries$iso_a3 == "USA", ]
+
+kml_sf <- st_as_sf(dat)
+kml_sf <- st_transform(kml_sf, crs = st_crs(4326))
+
+# Convert points to a small buffer around each point (assuming small area)
+buffer_radius <- 0.01  # Adjust this based on your data
+kml_sf_buffered <- st_buffer(kml_sf, dist = buffer_radius)
+
+st_geometry(kml_sf)
+# Variables
+v22 <- load_variables(2022, "acs5", cache = TRUE)
+
+
+# FIPS
+geo_id_data <- tidycensus::get_decennial(
+  geography = "block group",
+  variables = "GEOID",
+  geometry = kml_sf_buffered$geometry,
+  years = 2020,
+  output = "tidy"
+)
+```
+
+```{r}
+coords <- st_coordinates(dat)
+#coordinates_with_name <- cbind(coordinates, name = original_data$name)
+
+
+```
+
+```{r}
+# Contiguous US state boundaries
+usa = st_as_sf(maps::map("state", fill = TRUE, plot = FALSE))
+```
+```{r}
+ggplot() +
+  geom_sf(data = us_boundaries, fill = "lightgrey", color = "black") +
+  geom_sf(data = dat, color = "red") +
+  ggtitle("Map of Locations with US Boundaries")
+```
+
+
+```{r}
+# Plot the data using leaflet
+# Create an interactive map with leaflet
+leaflet() %>%
+  addPolygons(data = us_boundaries, fillOpacity = 0, color = "black") %>%
+  addCircleMarkers(data = dat, color = "red", fill = TRUE, fillOpacity = 1, radius = 1) %>%
+  addTiles() %>%
+  setView(-98.583333, 39.833333, zoom = 4) %>%
+  addLayersControl(overlayGroups = c("US Boundaries", "Locations"), options = layersControlOptions(collapsed = FALSE))
+```
+
+```{r}
+tmp <- data.frame(Name = "Apartment",
+                         Address = "2403 Watts St, Houston, TX")
+
+df_address <- tmp %>%
+  geocode(Address, method = 'osm', lat = latitude , long = longitude)
+
+```
+
+```{r}
+dat_coords <- as.data.frame(st_coordinates(dat))
+
+# Function to find the closest point in df2 for each point in df1
+find_closest <- function(lat1, lon1, df_coords, df_stores, n_closest) {
+  distances <- distVincentySphere(cbind(lon1, lat1), cbind(df_coords$X, df_coords$Y))
+  closest_index <- order(distances)[1:n_closest]
+  #return(c(df_stores$Name[closest_index], order(distances)[1:n_closest]* 0.000621371))
+  return(df_stores$Name[closest_index])
+}
+
+# Apply the function to each row in df1
+mapply(find_closest, df_address$latitude, df_address$longitude, MoreArgs = list(dat_coords), 5)
+
+nearby_stores <- find_closest(df_address$latitude, df_address$longitude, dat_coords, dat, 5)
+```
+
+```{r}
+dat_closeby <- dat %>%
+  filter(Name %in% nearby_stores)
+
+# Calculate bounding box for Houston points
+bbox_houston <- st_bbox(dat_closeby)
+```
+
+```{r}
+leaflet() %>%
+  addPolygons(data = us_boundaries, fillOpacity = 0, color = "black") %>%
+  addCircleMarkers(data = dat_closeby, color = "red", fill = TRUE, fillOpacity = 1, radius = 1) %>%
+  addTiles() %>%
+  setView(-98.583333, 39.833333, zoom = 4) %>%
+  #setView(lng = bbox_houston[1], lat = bbox_houston[2], zoom = 4) %>%
+  addLayersControl(overlayGroups = c("US Boundaries", "Locations"), options = layersControlOptions(collapsed = FALSE))
+```
+
+
+```{r}
+# Create Leaflet map
+leaflet() %>%
+  addCircleMarkers(data = dat_closeby, color = "red", fill = TRUE, fillOpacity = 1, radius = 5) %>%
+  addTiles() %>%
+  setView(lng = bbox_houston[2], lat = bbox_houston[1], zoom = 12) %>%
+  addLayersControl(overlayGroups = c("Locations"), options = layersControlOptions(collapsed = FALSE))
+```
+
